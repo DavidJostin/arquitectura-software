@@ -1,0 +1,4 @@
+playwright>=1.48
+pydantic>=2.7
+# Opcional: si no se instala, el scraper usa solo su script stealth propio.
+playwright-stealth>=2.0.0

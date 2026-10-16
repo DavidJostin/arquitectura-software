@@ -1,0 +1,42 @@
+[
+  {
+    "domain": ".instagram.com",
+    "expirationDate": 1800000000,
+    "httpOnly": true,
+    "name": "sessionid",
+    "path": "/",
+    "sameSite": "no_restriction",
+    "secure": true,
+    "value": "PEGA_AQUI_TU_SESSIONID"
+  },
+  {
+    "domain": ".instagram.com",
+    "expirationDate": 1800000000,
+    "httpOnly": false,
+    "name": "ds_user_id",
+    "path": "/",
+    "sameSite": "no_restriction",
+    "secure": true,
+    "value": "PEGA_AQUI_TU_DS_USER_ID"
+  },
+  {
+    "domain": ".instagram.com",
+    "expirationDate": 1800000000,
+    "httpOnly": false,
+    "name": "csrftoken",
+    "path": "/",
+    "sameSite": "lax",
+    "secure": true,
+    "value": "PEGA_AQUI_TU_CSRFTOKEN"
+  },
+  {
+    "domain": ".instagram.com",
+    "expirationDate": 1800000000,
+    "httpOnly": true,
+    "name": "mid",
+    "path": "/",
+    "sameSite": "no_restriction",
+    "secure": true,
+    "value": "PEGA_AQUI_TU_MID"
+  }
+]
