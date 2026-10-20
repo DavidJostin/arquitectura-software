@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 DataSource = Literal["network", "dom"]
+PostType = Literal["Image", "Video", "Carousel"]
 
 
 class Profile(BaseModel):
@@ -24,6 +25,11 @@ class Profile(BaseModel):
     source: DataSource = "network"
 
 
+class Comment(BaseModel):
+    username: str | None = None
+    text: str
+
+
 class Post(BaseModel):
     post_id: str
     shortcode: str
@@ -34,6 +40,10 @@ class Post(BaseModel):
     comment_count: int | None = None
     image_url: str | None = None
     is_video: bool = False
+    post_type: PostType = "Image"
+    media_count: int | None = Field(default=None, ge=0)  # solo en carruseles
+    hashtags: list[str] = Field(default_factory=list)
+    top_comments: list[Comment] = Field(default_factory=list)
     source: DataSource = "network"
 
 

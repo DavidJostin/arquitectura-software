@@ -14,6 +14,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.sync_api import (
     Browser,
@@ -34,14 +35,18 @@ from exceptions import (
     ScraperError,
     SessionExpiredError,
 )
-from models import Post, Profile, ScrapeResult
+from models import Comment, Post, PostType, Profile, ScrapeResult
 from utils.humanize import human_scroll, jitter, random_mouse_move
 
 log = logging.getLogger(__name__)
 
 _SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _SHORTCODE_RE = re.compile(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)")
+# '#' precedido de inicio o de un carácter que no sea palabra/'&' (evita '&#39;').
+_HASHTAG_RE = re.compile(r"(?<![\w&])#(\w+)")
 _RATE_LIMIT_HINTS = ("wait a few minutes", "feedback_required", "rate limit", "try again later")
+# Formulario de login que Instagram superpone a veces SIN cambiar la URL.
+_LOGIN_FORM_SELECTOR = 'form#loginForm, input[name="username"][type="text"]'
 
 # fetch ejecutado dentro de la página: usa las cookies y cabeceras del navegador.
 _PROFILE_FETCH_JS = """
@@ -94,6 +99,11 @@ class InstagramScraper:
         self.close()
 
     def start(self) -> None:
+        if urlparse(config.INSTAGRAM_URL).path.strip("/"):
+            raise ScraperError(
+                f"config.INSTAGRAM_URL debe ser la URL base 'https://www.instagram.com', "
+                f"no un perfil ({config.INSTAGRAM_URL!r}). El perfil va en TARGET_PROFILE."
+            )
         self._pw = sync_playwright().start()
         self._browser = self._launch_browser()
         user_agent = config.USER_AGENT or config.USER_AGENT_TEMPLATE.format(
@@ -218,9 +228,13 @@ class InstagramScraper:
         assert self._page is not None
         log.info("Abriendo perfil @%s", self._target)
         response = self._goto(f"{config.INSTAGRAM_URL}/{self._target}/")
-        if response is not None and response.status == 404:
-            raise ProfileNotFoundError(f"El perfil @{self._target} no existe.")
+        # Primero la sesión: un login/checkpoint también puede llegar como 404.
         self._assert_session_alive()
+        if response is not None and response.status == 404:
+            self._screenshot("perfil_404")
+            raise ProfileNotFoundError(
+                f"El perfil @{self._target} no existe (HTTP 404 en {response.url})."
+            )
         try:
             self._page.wait_for_load_state("networkidle", timeout=config.NETWORK_IDLE_TIMEOUT_MS)
         except PlaywrightTimeoutError:
@@ -231,22 +245,49 @@ class InstagramScraper:
         assert self._page is not None and self._context is not None
         url = self._page.url
         if "/challenge" in url or "/checkpoint" in url:
+            shot = self._screenshot("checkpoint")
             raise ChallengeRequiredError(
                 "Instagram pide verificar la cuenta (checkpoint). Resuélvelo manualmente "
-                "en el navegador y exporta de nuevo las cookies."
+                f"en el navegador y exporta de nuevo las cookies. Captura: {shot}"
             )
-        if "/accounts/login" in url:
+        if "/accounts/login" in url or self._login_form_visible():
+            shot = self._screenshot("login")
             raise SessionExpiredError(
-                "Instagram redirigió al login: las cookies caducaron o fueron revocadas. "
-                "Vuelve a exportarlas desde un navegador con la sesión iniciada."
+                "Instagram muestra el login: las cookies caducaron o fueron revocadas. "
+                f"Vuelve a exportarlas desde un navegador con la sesión iniciada. Captura: {shot}"
             )
         session = next(
             (c for c in self._context.cookies(config.INSTAGRAM_URL) if c["name"] == "sessionid"),
             None,
         )
         if not session or not session["value"]:
-            raise SessionExpiredError("Instagram eliminó la cookie 'sessionid': sesión inválida.")
+            shot = self._screenshot("sin_sessionid")
+            raise SessionExpiredError(
+                f"Instagram eliminó la cookie 'sessionid': sesión inválida. Captura: {shot}"
+            )
         self._raise_if_flagged()
+
+    def _login_form_visible(self) -> bool:
+        assert self._page is not None
+        try:
+            return self._page.locator(_LOGIN_FORM_SELECTOR).first.is_visible()
+        except PlaywrightError:
+            return False
+
+    def _screenshot(self, reason: str) -> str | None:
+        """Guarda una captura de página completa en config.DEBUG_DIR para diagnosticar."""
+        if self._page is None:
+            return None
+        config.DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = config.DEBUG_DIR / f"{stamp}_{reason}.png"
+        try:
+            self._page.screenshot(path=str(path), full_page=True)
+        except PlaywrightError as exc:
+            log.warning("No se pudo guardar la captura (%s): %s", reason, exc)
+            return None
+        log.info("Captura guardada en %s (URL actual: %s)", path, self._page.url)
+        return str(path)
 
     def _raise_if_flagged(self) -> None:
         if self._rate_limited:
@@ -355,19 +396,24 @@ class InstagramScraper:
             return True
 
         raw_id = node.get("pk") or str(node.get("id", "")).split("_")[0]
+        caption = _caption(node)
+        post_type, media_count = _post_type(node)
         self._posts[shortcode] = Post(
             post_id=str(raw_id or shortcode_to_media_id(shortcode)),
             shortcode=shortcode,
             url=f"{config.INSTAGRAM_URL}/p/{shortcode}/",
-            caption=_caption(node),
+            caption=caption,
+            hashtags=extract_hashtags(caption),
+            post_type=post_type,
+            media_count=media_count,
+            top_comments=_preview_comments(node),
             timestamp=datetime.fromtimestamp(taken_at, tz=timezone.utc),
             like_count=_first(node.get("like_count"), _count(node, "edge_liked_by"),
                               _count(node, "edge_media_preview_like")),
             comment_count=_first(node.get("comment_count"), _count(node, "edge_media_to_comment"),
                                  _count(node, "edge_media_preview_comment")),
             image_url=_image_url(node),
-            is_video=bool(node.get("is_video") or node.get("media_type") == 2
-                          or node.get("product_type") == "clips"),
+            is_video=post_type == "Video",
         )
         return True
 
@@ -390,7 +436,10 @@ class InstagramScraper:
             log.warning("La API no devolvió el perfil; usando respaldo DOM (menos preciso).")
             self._profile = self._profile_from_dom()
         if self._profile is None:
-            raise ProfileNotFoundError(f"No se pudo obtener información de @{self._target}.")
+            shot = self._screenshot("perfil_sin_datos")
+            raise ProfileNotFoundError(
+                f"No se pudo obtener información de @{self._target}. Captura: {shot}"
+            )
         return self._profile
 
     def _fetch_profile_api(self) -> None:
@@ -406,7 +455,8 @@ class InstagramScraper:
         if status == 401:
             raise SessionExpiredError("web_profile_info respondió 401: sesión inválida.")
         if status == 404:
-            raise ProfileNotFoundError(f"El perfil @{self._target} no existe.")
+            self._screenshot("perfil_api_404")
+            raise ProfileNotFoundError(f"El perfil @{self._target} no existe (web_profile_info 404).")
         if status != 200:
             log.warning("web_profile_info respondió HTTP %s", status)
             return
@@ -477,13 +527,17 @@ class InstagramScraper:
             if not match or match.group(1) in self._posts:
                 continue
             shortcode = match.group(1)
+            is_video = "/reel/" in (anchor.get("href") or "")
+            caption = anchor.get("alt") or None
             self._posts[shortcode] = Post(
                 post_id=shortcode_to_media_id(shortcode),
                 shortcode=shortcode,
                 url=f"{config.INSTAGRAM_URL}/p/{shortcode}/",
-                caption=anchor.get("alt") or None,
+                caption=caption,
+                hashtags=extract_hashtags(caption),
+                post_type="Video" if is_video else "Image",
                 image_url=anchor.get("img"),
-                is_video="/reel/" in (anchor.get("href") or ""),
+                is_video=is_video,
                 source="dom",
             )
             added += 1
@@ -522,6 +576,13 @@ def parse_json_payloads(text: str) -> list[Any]:
             except json.JSONDecodeError:
                 continue
         return payloads
+
+
+def extract_hashtags(text: str | None) -> list[str]:
+    """Devuelve los '#hashtags' del texto, sin duplicados y en orden de aparición."""
+    if not text:
+        return []
+    return list(dict.fromkeys(f"#{tag}" for tag in _HASHTAG_RE.findall(text)))
 
 
 def shortcode_to_media_id(shortcode: str) -> str:
@@ -569,6 +630,48 @@ def _caption(node: dict[str, Any]) -> str | None:
         return caption
     edges = (node.get("edge_media_to_caption") or {}).get("edges") or []
     return edges[0].get("node", {}).get("text") if edges else None
+
+
+def _post_type(node: dict[str, Any]) -> tuple[PostType, int | None]:
+    """Clasifica el post (API v1: media_type 1/2/8; GraphQL: __typename/sidecar)."""
+    sidecar = (node.get("edge_sidecar_to_children") or {}).get("edges")
+    children = node.get("carousel_media") or sidecar
+    if (node.get("media_type") == 8 or children
+            or str(node.get("__typename", "")).endswith("Sidecar")):
+        count = _first(node.get("carousel_media_count"),
+                       len(children) if isinstance(children, list) else None)
+        return "Carousel", count
+    if (node.get("is_video") or node.get("media_type") == 2
+            or node.get("product_type") == "clips"):
+        return "Video", None
+    return "Image", None
+
+
+def _preview_comments(node: dict[str, Any]) -> list[Comment]:
+    """Comentarios de vista previa: 'preview_comments'/'comments' (API v1) o los
+    edges de 'edge_media_to_parent_comment'/'edge_media_preview_comment' (GraphQL)."""
+    raw: list[Any] = []
+    for key in ("preview_comments", "comments"):
+        if isinstance(node.get(key), list):
+            raw = node[key]
+            break
+    else:
+        for key in ("edge_media_to_parent_comment", "edge_media_preview_comment"):
+            edges = (node.get(key) or {}).get("edges") or []
+            if edges:
+                raw = [e.get("node") for e in edges if isinstance(e, dict)]
+                break
+
+    comments: list[Comment] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        author = item.get("user") or item.get("owner") or {}
+        username = author.get("username") if isinstance(author, dict) else None
+        comments.append(Comment(username=username, text=item["text"]))
+        if len(comments) >= config.MAX_PREVIEW_COMMENTS:
+            break
+    return comments
 
 
 def _image_url(node: dict[str, Any]) -> str | None:

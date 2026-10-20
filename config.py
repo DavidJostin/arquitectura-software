@@ -8,17 +8,20 @@ BASE_DIR = Path(__file__).resolve().parent
 COOKIES_PATH = BASE_DIR / "cookies.json"
 OUTPUT_PATH = BASE_DIR / "output.json"
 
+DEBUG_DIR = BASE_DIR / "debug"  # capturas cuando Instagram pide login/checkpoint
+
 # --- Objetivo ----------------------------------------------------------------
 # Perfil a extraer cuando se ejecuta `python main.py` sin argumentos (o con
 # "Run" del editor). Acepta "usuario", "@usuario" o la URL completa del perfil.
-TARGET_PROFILE = "https://www.instagram.com/raulbazanm/"
+TARGET_PROFILE = "https://www.instagram.com/jessicapauchi099/"
 
 # --- Instagram ---------------------------------------------------------------
 # URL base del sitio: NO poner aquí un perfil (se usa para construir todas las URLs).
 INSTAGRAM_URL = "https://www.instagram.com"
 # App ID público que usa la web de Instagram en la cabecera X-IG-App-ID.
 IG_APP_ID = "936619743392459"
-MAX_POSTS = 5
+MAX_POSTS = 200
+MAX_PREVIEW_COMMENTS = 5  # comentarios de vista previa guardados por post
 
 # Fragmentos de URL cuyas respuestas JSON se interceptan.
 API_URL_PATTERNS = (
